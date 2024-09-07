@@ -63,10 +63,7 @@ impl<'src> Scanner<'src> {
 
     fn scan(&mut self) -> Vec<Token<'_>> {
         let mut tokens = vec![];
-        while !self.is_at_end() {
-            self.start = self.curr;
-
-            let b = self.advance();
+        while let Some(b) = self.advance() {
             match b {
                 b'(' => tokens.push(self.make_token(TokenType::LParen)),
                 b')' => tokens.push(self.make_token(TokenType::RParen)),
@@ -111,10 +108,13 @@ impl<'src> Scanner<'src> {
                     tokens.push(self.make_token(typ))
                 }
                 b'/' => {
+                    // is comment
                     if self.advance_if_match(b'/') {
-                        while !self.is_at_end() && self.src.bytes().nth(self.curr).unwrap() != b'\n'
-                        {
-                            self.curr += 1;
+                        loop {
+                            match self.peek() {
+                                Some(c) if c != b'\n' => {}
+                                _ => break,
+                            }
                         }
                     } else {
                         tokens.push(self.make_token(TokenType::Slash));
@@ -124,6 +124,16 @@ impl<'src> Scanner<'src> {
                 b'\n' => {
                     self.line += 1;
                 }
+                b'"' => {
+                    if let Some(token) = self.scan_str() {
+                        tokens.push(token);
+                    }
+                }
+                b if b.is_ascii_digit() => {
+                    if let Some(token) = self.scan_num() {
+                        tokens.push(token);
+                    }
+                }
                 _ => {
                     self.errors.push(ScanError {
                         line: self.line,
@@ -131,52 +141,102 @@ impl<'src> Scanner<'src> {
                     });
                 }
             }
+
+            self.start = self.curr;
         }
-        tokens.push(Token {
-            typ: TokenType::Eof,
-            lexeme: "",
-            line: self.line,
-        });
+        tokens.push(self.make_token(TokenType::Eof));
         tokens
     }
 
-    fn advance(&mut self) -> u8 {
-        let b = self.src.bytes().nth(self.curr).unwrap();
-        self.curr += 1;
-        b
-    }
-
-    fn advance_if_match(&mut self, expected: u8) -> bool {
-        if self.is_at_end() || self.src.bytes().nth(self.curr).unwrap() != expected {
-            false
-        } else {
-            self.curr += 1;
-            true
+    fn scan_str<'a>(&'a mut self) -> Option<Token<'src>> {
+        loop {
+            match self.advance() {
+                None => {
+                    self.errors.push(ScanError {
+                        line: self.line,
+                        message: "Unterminated string.".to_string(),
+                    });
+                    break None;
+                }
+                Some(b'\n') => {
+                    self.line += 1;
+                }
+                Some(b'"') => {
+                    break Some(
+                        self.make_token(TokenType::Str(&self.src[self.start + 1..self.curr - 1])),
+                    );
+                }
+                _ => {}
+            }
         }
     }
 
-    fn make_token<'a>(&'a self, typ: TokenType) -> Token<'src> {
+    fn scan_num<'a>(&'a mut self) -> Option<Token<'src>> {
+        loop {
+            match self.peek() {
+                Some(c) if c.is_ascii_digit() => {
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        if self.peek() == Some(b'.') && self.peek_next().map_or(false, |b| b.is_ascii_digit()) {
+            self.advance();
+            loop {
+                match self.peek() {
+                    Some(c) if c.is_ascii_digit() => {
+                        self.advance();
+                    }
+                    _ => break,
+                }
+            }
+        }
+        Some(self.make_token(TokenType::Number(
+            self.src[self.start..self.curr].parse().ok()?,
+        )))
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.src.bytes().nth(self.curr)
+    }
+
+    fn peek_next(&self) -> Option<u8> {
+        self.src.bytes().nth(self.curr + 1)
+    }
+
+    fn advance(&mut self) -> Option<u8> {
+        let b = self.src.bytes().nth(self.curr)?;
+        self.curr += 1;
+        Some(b)
+    }
+
+    fn advance_if_match(&mut self, expected: u8) -> bool {
+        if self.peek() == Some(expected) {
+            self.curr += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn make_token<'a>(&'a self, typ: TokenType<'src>) -> Token<'src> {
         Token {
             typ,
             lexeme: &self.src[self.start..self.curr],
             line: self.line,
         }
     }
-
-    fn is_at_end(&self) -> bool {
-        self.curr >= self.src.len()
-    }
 }
 
 #[derive(Debug)]
 struct Token<'src> {
-    typ: TokenType,
+    typ: TokenType<'src>,
     lexeme: &'src str,
     line: usize,
 }
 
 #[derive(Debug)]
-enum TokenType {
+enum TokenType<'src> {
     // Single-character tokens.
     LParen,
     RParen,
@@ -202,8 +262,8 @@ enum TokenType {
 
     // Literals.
     Ident,
-    Str,
-    Number,
+    Str(&'src str),
+    Number(f64),
 
     // Keywords.
     And,
